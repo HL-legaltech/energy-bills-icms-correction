@@ -3,12 +3,15 @@ import re
 import pdfplumber
 import pandas as pd
 
+# Configuration constants
 INPUT_FILES_DIR = "./input"
 CORRECT_TAX_RATE = 0.1508
 
-files = os.listdir(INPUT_FILES_DIR)
+# Get list of files to process
+input_files = os.listdir(INPUT_FILES_DIR)
 
-table_data = {
+# Define the structure for our tax data
+tax_data_columns = {
     "installation_number": [],
     "client_number": [],
     "period": [],
@@ -19,10 +22,21 @@ table_data = {
     "correct_icms": [],
     "credits": [],
 }
-df = pd.DataFrame(table_data)
+
+# Initialize DataFrame with our column structure
+tax_data_df = pd.DataFrame(tax_data_columns)
 
 
-def extract_client_and_installation(text):
+def extract_client_and_installation(text: str) -> tuple[str | None, str | None]:
+    """
+    Extract client and installation numbers from the PDF text using regex.
+
+    Args:
+        text: The text content to search in
+
+    Returns:
+        Tuple containing client number and installation number (both optional)
+    """
     client_match = re.search(r"Nº DO CLIENTE\n(\d+)", text)
     installation_match = re.search(r"Nº DA INSTALAÇÃO\n(\d+)", text)
 
@@ -32,8 +46,17 @@ def extract_client_and_installation(text):
     return client_number, installation_number
 
 
-def parse_float(string):
-    clean_string = string.replace(".", "").replace(",", ".")
+def parse_brazilian_float(value_str: str) -> float | None:
+    """
+    Convert Brazilian number format (using comma as decimal separator) to float.
+
+    Args:
+        value_str: String representing a number in Brazilian format (e.g., "1.234,56")
+
+    Returns:
+        Converted float value or None if conversion fails
+    """
+    clean_string = value_str.replace(".", "").replace(",", ".")
 
     try:
         return float(clean_string)
@@ -41,171 +64,224 @@ def parse_float(string):
         return None
 
 
-def extract_tables_and_text(file_path: str):
-    with pdfplumber.open(file_path) as pdf:
-        # Extract text from each page
-        all_text = ""
+def extract_pdf_content(file_path: str) -> tuple[list, str]:
+    """
+    Extract both tables and text content from a PDF file.
 
+    Args:
+        file_path: Path to the PDF file
+
+    Returns:
+        Tuple containing (tables, text_content)
+    """
+    with pdfplumber.open(file_path) as pdf:
+        # Extract all text from PDF
+        full_text = ""
         for page in pdf.pages:
             text = page.extract_text()
             if text:
-                all_text += text + "\n"
+                full_text += text + "\n"
 
-        # Extract tables from each page
+        # Extract all tables from PDF
         all_tables = []
         for page in pdf.pages:
             tables = page.extract_tables()
             if tables:
                 all_tables.extend(tables)
 
-    return all_tables, all_text
+    return all_tables, full_text
 
 
-def layout_1_processing(tables: list, text: str, page):
-    print("------------------\nProcessing PAGE #", page, "---------------\n")
+def process_tax_page(tables: list, text: str, page_num: int) -> None:
+    """
+    Process a single page of tax information from the PDF.
+    Handles two different layouts: tax information layout and standard layout.
 
-    lines = text.splitlines()
+    Args:
+        tables: List of tables extracted from the page
+        text: Text content of the page
+        page_num: Page number for logging purposes
+    """
+    print(f"------------------\nProcessing PAGE #{page_num}---------------\n")
 
+    text_lines = text.splitlines()
     current_month = ""
     client_number = ""
     installation_number = ""
 
-    # The same file can have two layouts. This is how we detect one of them.
+    # Process special tax information layout
     if "INFORMAÇÕES DE TRIBUTOS" in text:
-        for table in tables:
-            if len(table) == 15:
-                client_number, installation_number = extract_client_and_installation(
-                    table[2][-1]
-                )
-                calculation_base = parse_float(table[-1][0])
-                applied_tax_rate = parse_float(table[-1][1])
-                paid_icms = parse_float(table[-1][2])
-
-        for i in range(len(lines)):
-            if "CONTA CONTRATO" in lines[i - 1]:
-                if "/" in lines[i].split(" ")[1]:
-                    current_month = lines[i].split(" ")[1]
-
-                    df.loc[len(df)] = {
-                        "client_number": client_number,
-                        "period": current_month,
-                        "calculation_base": calculation_base,
-                        "applied_tax_rate": str(round(applied_tax_rate, 2)) + "%",
-                        "fixed_tax_rate": str(round(CORRECT_TAX_RATE * 100, 2)) + "%",
-                        "correct_icms": round(CORRECT_TAX_RATE * calculation_base, 2),
-                        "client_number": client_number,
-                        "installation_number": installation_number,
-                        "paid_icms": paid_icms,
-                        "credits": round(
-                            paid_icms - (CORRECT_TAX_RATE * calculation_base), 2
-                        ),
-                    }
-
+        _process_tax_info_layout(tables, text_lines)
     else:
-        for table in tables:
-            if len(table) == 2 and "CÓDIGO DA INSTALAÇÃO" in table[0][0]:
-                client_number = table[0][0].split("\n")[1]
-                installation_number = table[1][0].split("\n")[1]
+        _process_standard_layout(tables, text_lines)
 
-        for i in range(len(lines)):
-            words = lines[i].split()
 
-            if len(words) >= 4:
-                last_four = words[-4:]
+def _process_tax_info_layout(tables: list, text_lines: list) -> None:
+    """
+    Process pages with "INFORMAÇÕES DE TRIBUTOS" layout.
+    This layout has tax information in a specific table format.
+    """
+    for table in tables:
+        if len(table) == 15:
+            client_number, installation_number = extract_client_and_installation(
+                table[2][-1]
+            )
+            calculation_base = parse_brazilian_float(table[-1][0])
+            applied_tax_rate = parse_brazilian_float(table[-1][1])
+            paid_icms = parse_brazilian_float(table[-1][2])
 
-                if last_four[0] == "ICMS" and all(
-                    any(c.isdigit() for c in item) for item in last_four[1:]
-                ):
-                    try:
-                        invalid_number = False
-                        # Check if the numbers match the expected format
-                        for num in last_four[1:]:
-                            # Verify numbers contain digits, comma and/or dot
-                            if not all(c.isdigit() or c in ",." for c in num):
-                                invalid_number = True
-                                break
+            _extract_and_add_tax_record(
+                text_lines,
+                client_number,
+                installation_number,
+                calculation_base,
+                applied_tax_rate,
+                paid_icms,
+            )
 
-                        if not invalid_number:
-                            calculation_base = parse_float(last_four[1])
-                            applied_tax_rate = parse_float(last_four[2])
-                            paid_icms = parse_float(last_four[3])
 
-                            # Add row to the table if all values are defined
-                            if (
-                                calculation_base is not None
-                                and applied_tax_rate is not None
-                                and paid_icms is not None
-                            ):
-                                df.loc[len(df)] = {
-                                    "client_number": None,
-                                    "period": current_month,
-                                    "calculation_base": calculation_base,
-                                    "applied_tax_rate": str(round(applied_tax_rate, 2))
-                                    + "%",
-                                    "fixed_tax_rate": str(
-                                        round(CORRECT_TAX_RATE * 100, 2)
-                                    )
-                                    + "%",
-                                    "correct_icms": round(
-                                        CORRECT_TAX_RATE * calculation_base, 2
-                                    ),
-                                    "client_number": client_number,
-                                    "installation_number": installation_number,
-                                    "paid_icms": paid_icms,
-                                    "credits": round(
-                                        paid_icms
-                                        - (CORRECT_TAX_RATE * calculation_base),
-                                        2,
-                                    ),
-                                }
+def _process_standard_layout(tables: list, text_lines: list) -> None:
+    """
+    Process pages with standard layout.
+    This layout has tax information spread across the document in a different format.
+    """
+    client_number = installation_number = current_month = None
 
-                        else:
-                            print("Invalid number found")
-                            print(last_four[1:])
-                    except:
-                        continue
+    # Extract client and installation info from tables
+    for table in tables:
+        if len(table) == 2 and "CÓDIGO DA INSTALAÇÃO" in table[0][0]:
+            client_number = table[0][0].split("\n")[1]
+            installation_number = table[1][0].split("\n")[1]
 
-            if (
-                i > 0
-                and "TOTAL A PAGAR" in lines[i - 1]
-                and "REF:MÊS/ANO" in lines[i - 1]
-            ):
-                current_month = lines[i].split(" ")[0]
+    # Process each line for tax information
+    for i, line in enumerate(text_lines):
+        words = line.split()
+
+        # Extract month information
+        if (
+            i > 0
+            and "TOTAL A PAGAR" in text_lines[i - 1]
+            and "REF:MÊS/ANO" in text_lines[i - 1]
+        ):
+            current_month = words[0]
+
+        # Process tax values if line contains ICMS information
+        if len(words) >= 4:
+            _process_icms_line(
+                words[-4:], client_number, installation_number, current_month
+            )
+
+
+def _process_icms_line(
+    values: list, client_number: str, installation_number: str, current_month: str
+) -> None:
+    """Process a line containing ICMS tax information."""
+    if values[0] != "ICMS":
+        return
+
+    try:
+        # Validate number format
+        if not all(all(c.isdigit() or c in ",." for c in num) for num in values[1:]):
+            print("Invalid number format found:", values[1:])
+            return
+
+        # Parse tax values
+        calculation_base = parse_brazilian_float(values[1])
+        applied_tax_rate = parse_brazilian_float(values[2])
+        paid_icms = parse_brazilian_float(values[3])
+
+        # Add tax record if all values are valid
+        if all(v is not None for v in [calculation_base, applied_tax_rate, paid_icms]):
+            _add_tax_record(
+                client_number,
+                installation_number,
+                current_month,
+                calculation_base,
+                applied_tax_rate,
+                paid_icms,
+            )
+    except Exception as e:
+        print(f"Error processing ICMS line: {e}")
+
+
+def _add_tax_record(
+    client_number: str,
+    installation_number: str,
+    period: str,
+    calculation_base: float,
+    applied_tax_rate: float,
+    paid_icms: float,
+) -> None:
+    """Add a new tax record to the DataFrame."""
+    correct_icms = round(CORRECT_TAX_RATE * calculation_base, 2)
+    tax_credits = round(paid_icms - correct_icms, 2)
+
+    tax_data_df.loc[len(tax_data_df)] = {
+        "client_number": client_number,
+        "installation_number": installation_number,
+        "period": period,
+        "calculation_base": calculation_base,
+        "applied_tax_rate": f"{round(applied_tax_rate, 2)}%",
+        "fixed_tax_rate": f"{round(CORRECT_TAX_RATE * 100, 2)}%",
+        "correct_icms": correct_icms,
+        "paid_icms": paid_icms,
+        "credits": tax_credits,
+    }
+
+
+def _extract_and_add_tax_record(
+    text_lines: list,
+    client_number: str,
+    installation_number: str,
+    calculation_base: float,
+    applied_tax_rate: float,
+    paid_icms: float,
+) -> None:
+    """Extract period information and add tax record for tax info layout."""
+    for i, line in enumerate(text_lines):
+        if "CONTA CONTRATO" in text_lines[i - 1]:
+            words = line.split()
+            if len(words) > 1 and "/" in words[1]:
+                _add_tax_record(
+                    client_number,
+                    installation_number,
+                    words[1],
+                    calculation_base,
+                    applied_tax_rate,
+                    paid_icms,
+                )
 
 
 if __name__ == "__main__":
-    print("Files to process:", files)
+    print("Files to process:", input_files)
 
-    selected_layout = "1"
+    # Process each PDF file
+    for file in input_files:
+        if not file.endswith(".pdf"):
+            continue
 
-    for file in files:
         file_path = os.path.join(INPUT_FILES_DIR, file)
+        print("Processing file:", file)
 
-        if file.endswith(".pdf"):
-            print("Processing file", file)
+        # Process each page in the PDF
+        with pdfplumber.open(file_path) as pdf:
+            for page_num, page in enumerate(pdf.pages, 1):
+                text = page.extract_text()
+                tables = page.extract_tables()
+                process_tax_page(tables, text, page_num)
 
-            # Open PDF and extract text and tables
-            with pdfplumber.open(file_path) as pdf:
-                for page in pdf.pages:
-                    text = page.extract_text()
-                    tables = page.extract_tables()
+    # Prepare final report
+    tax_data_df["period"] = pd.to_datetime(tax_data_df["period"], format="%m/%Y")
+    tax_data_df = tax_data_df.sort_values(by="period")
 
-                    # Process text and tables
-                    if selected_layout == "1":
-                        layout_1_processing(tables, text, page)
-
-                    print(df)
-
-    df["period"] = pd.to_datetime(df["period"], format="%m/%Y")
-    df = df.sort_values(by="period")
-
-    total_credits = df["credits"].sum()
+    # Add total row
+    total_credits = tax_data_df["credits"].sum()
     total_row = pd.DataFrame(
         [["Total", "", "", "", "", "", "", "", total_credits]],
-        columns=df.columns,
+        columns=tax_data_df.columns,
     )
-    df = pd.concat([df, total_row], ignore_index=True)
+    tax_data_df = pd.concat([tax_data_df, total_row], ignore_index=True)
 
-    print(df)
-
-    df.to_csv("output.csv", index=False)
+    # Save results
+    print(tax_data_df)
+    tax_data_df.to_csv("output.csv", index=False)
