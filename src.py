@@ -7,8 +7,17 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 import babel.numbers
-
 import locale
+import uuid
+import logging  # Import the logging module for better logging
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 locale.setlocale(locale.LC_ALL, "pt_BR.UTF-8")  # Set Brazilian currency format
 
@@ -19,6 +28,11 @@ CORRECT_TAX_RATE = 0.1508
 
 # Create output directory if it doesn't exist
 os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+def generate_random_string():
+    """Generate a random string of 6 characters (letters and numbers)."""
+    return uuid.uuid4().hex[:6]  # Take the first 6 characters of a UUID
 
 
 def style_excel_worksheet(ws):
@@ -86,6 +100,7 @@ def format_brl(value):
 
 def generate_reports(df):
     """Generate both Excel and PDF reports with correct BRL formatting."""
+    logger.info("Starting report generation...")
 
     # Rename columns to Portuguese
     portuguese_columns = {
@@ -128,6 +143,16 @@ def generate_reports(df):
         .sum()
     )
 
+    # Generate a random string for the file names
+    random_string = generate_random_string()
+    logger.info(f"Generated random string for filenames: {random_string}")
+
+    # Generate Excel report
+    excel_filename = f"relatorio_icms_{random_string}.xlsx"
+    excel_path = os.path.join(OUTPUT_DIR, excel_filename)
+    logger.info(f"Creating Excel report: {excel_filename}")
+    df.to_excel(excel_path, index=False)
+
     # Generate HTML for PDF
     html_content = f"""
     <html>
@@ -158,7 +183,10 @@ def generate_reports(df):
     </html>
     """
 
-    pdf_path = os.path.join(OUTPUT_DIR, "relatorio_icms.pdf")
+    # Generate PDF report
+    pdf_filename = f"relatorio_icms_{random_string}.pdf"
+    pdf_path = os.path.join(OUTPUT_DIR, pdf_filename)
+    logger.info(f"Creating PDF report: {pdf_filename}")
     pdfkit.from_string(
         html_content,
         pdf_path,
@@ -173,7 +201,8 @@ def generate_reports(df):
         },
     )
 
-    return os.path.join(OUTPUT_DIR, "relatorio_icms.xlsx"), pdf_path
+    logger.info("Report generation completed successfully.")
+    return excel_path, pdf_path
 
 
 def extract_client_and_installation(text: str) -> tuple[str | None, str | None]:
@@ -193,6 +222,7 @@ def parse_brazilian_float(value_str: str) -> float | None:
     try:
         return float(clean_string)
     except ValueError:
+        logger.warning(f"Failed to parse Brazilian float: {value_str}")
         return None
 
 
@@ -251,7 +281,7 @@ def _process_icms_line(
 
     try:
         if not all(all(c.isdigit() or c in ",." for c in num) for num in values[1:]):
-            print("Invalid number format found:", values[1:])
+            logger.warning(f"Invalid number format found: {values[1:]}")
             return
 
         calculation_base = parse_brazilian_float(values[1])
@@ -268,7 +298,7 @@ def _process_icms_line(
                 paid_icms,
             )
     except Exception as e:
-        print(f"Error processing ICMS line: {e}")
+        logger.error(f"Error processing ICMS line: {e}")
 
 
 def _add_tax_record(
@@ -321,8 +351,7 @@ def _extract_and_add_tax_record(
 
 def process_tax_page(tables: list, text: str, page_num: int) -> None:
     """Process a single page of tax information from the PDF."""
-    print(f"------------------\nProcessing PAGE #{page_num}---------------\n")
-
+    logger.info(f"Processing page #{page_num}...")
     text_lines = text.splitlines()
     if "INFORMAÇÕES DE TRIBUTOS" in text:
         _process_tax_info_layout(tables, text_lines)
@@ -347,15 +376,16 @@ if __name__ == "__main__":
 
     # Get list of files to process
     input_files = os.listdir(INPUT_FILES_DIR)
-    print("Files to process:", input_files)
+    logger.info(f"Found {len(input_files)} files to process: {input_files}")
 
     # Process each PDF file
     for file in input_files:
         if not file.endswith(".pdf"):
+            logger.warning(f"Skipping non-PDF file: {file}")
             continue
 
         file_path = os.path.join(INPUT_FILES_DIR, file)
-        print("Processing file:", file)
+        logger.info(f"Processing file: {file}")
 
         with pdfplumber.open(file_path) as pdf:
             for page_num, page in enumerate(pdf.pages, 1):
@@ -370,7 +400,8 @@ if __name__ == "__main__":
     tax_data_df = tax_data_df.sort_values(by="period")
 
     # Generate reports
+    logger.info("Generating final reports...")
     excel_path, pdf_path = generate_reports(tax_data_df)
-    print(f"\nReports generated successfully:")
-    print(f"Excel report: {excel_path}")
-    print(f"PDF report: {pdf_path}")
+    logger.info(f"Excel report saved to: {excel_path}")
+    logger.info(f"PDF report saved to: {pdf_path}")
+    logger.info("Script execution completed successfully.")
